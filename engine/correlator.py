@@ -18,7 +18,7 @@ class Correlator:
         store_window_seconds: int = 600,          # keep last 10 minutes
         storm_window_seconds: int = 60,           # count storms in last 60s
         storm_threshold: int = 5,                 # >5 in 60s => THROTTLE/BLOCK
-        contradiction_window_seconds: int = 120,  # long->short quickly
+        contradiction_window_seconds: int = 5,  # long->short quickly
         low_conf_window_seconds: int = 180,       # 3 minutes
         low_conf_threshold: int = 4,              # 4 low-conf signals => THROTTLE
         low_conf_strength: float = 0.4,

@@ -20,7 +20,7 @@ def sign(secret: str, body: bytes) -> str:
     return f"{SIG_PREFIX}{mac}"
 
 
-def make_event(event_id: str | None = None, sent_time: datetime | None = None, strategy_id: str = "nas100_breakout_v1", side: str = "long", strength: float = 0.73) -> dict:
+def make_event(event_id: str | None = None, sent_time: datetime | None = None, strategy_id: str = "nas100_breakout_v1", side: str = "long", strength: float = 0.73, entry_hint: float = 2000.0) -> dict:
     now = datetime.now(timezone.utc)
     return {
         "event_type": "tv.signal.v1",
@@ -35,6 +35,7 @@ def make_event(event_id: str | None = None, sent_time: datetime | None = None, s
         "sent_time_utc": (sent_time or now).isoformat(),
         "volatility_atr": 12.3,
         "tags": ["mvp", "test"],
+        "entry_hint": entry_hint,
     }
 
 
@@ -120,6 +121,53 @@ def main():
                 print(i + 1, code, body.get("correlation", {}).get("decision"), body.get("correlation", {}).get("reasons"))
             else:
                 print(i + 1, code, body)
+
+        print("\n8) Day 4: Cooldown test (loss -> cooldown -> blocked)")
+
+        strat = "policy_cooldown_test_v1"
+
+        # Step 1: Open long at 2000
+        e1 = make_event(strategy_id=strat, side="long", entry_hint=2000.0)
+        c1, b1 = post_event(client, secret, e1)
+        print("open long:", c1, b1.get("final_decision"), b1.get("policy", {}).get("reasons"))
+
+        # Step 2: Flip signal to short at 1990 (close long at loss => cooldown)
+        e2 = make_event(strategy_id=strat, side="short", entry_hint=1990.0)
+        c2, b2 = post_event(client, secret, e2)
+        print("close loss:", c2, b2.get("final_decision"), b2.get("policy", {}).get("reasons"),
+              "pnl:", b2.get("policy", {}).get("context", {}).get("closed_pnl"))
+
+        # Step 3: Immediately send another signal (should be BLOCK due to cooldown_active)
+        e3 = make_event(strategy_id=strat, side="long", entry_hint=1995.0)
+        c3, b3 = post_event(client, secret, e3)
+        print("during cooldown:", c3, b3.get("final_decision"), b3.get("policy", {}).get("reasons"),
+              "cooldown_until:", b3.get("policy", {}).get("context", {}).get("cooldown_until_utc"))
+
+        print("\n9) Day 4: Kill switch test (exceed max daily loss)")
+
+        strat = "policy_killswitch_test_v1"
+
+        # We'll create repeated losing round-trips:
+        # open long 2000, close short 1997 => -3 (if qty=1) per cycle.
+        for i in range(3):
+            e_open = make_event(strategy_id=strat, side="long", entry_hint=2000.0)
+            co, bo = post_event(client, secret, e_open)
+            print(f"cycle {i+1} open:", co, bo.get("final_decision"), bo.get("policy", {}).get("reasons"))
+
+            e_close = make_event(strategy_id=strat, side="short", entry_hint=1997.0)
+            cc, bc = post_event(client, secret, e_close)
+            print(f"cycle {i+1} close:", cc, bc.get("final_decision"), bc.get("policy", {}).get("reasons"),
+                  "realised_pnl:", bc.get("policy", {}).get("context", {}).get("realised_pnl"))
+
+        # Check if cooldown is lifted after the applied timeout
+        print("\nWaiting for cooldown to be finished\n")
+        time.sleep(6)
+
+        # After enough losses, additional events should be blocked by kill switch. Right now kill switch is not active since max_daily_loss is not exceeded.
+        e_after = make_event(strategy_id=strat, side="long", entry_hint=2000.0)
+        ca, ba = post_event(client, secret, e_after)
+        print("after losses:", ca, ba.get("final_decision"), ba.get("policy", {}).get("reasons"))
+
 
 if __name__ == "__main__":
     main()

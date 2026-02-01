@@ -21,12 +21,25 @@ from datetime import datetime, timezone
 from engine.correlator import Correlator
 from engine.models import EventRecord
 
+from engine.portfolio import PaperPortfolio
+from engine.policy import RiskPolicyEngine
+
 app = FastAPI(title="ARES Gateway", version="0.2.0")
 
 # MVP singletons (in-memory)
 audit = AuditLogger(file_path="gateway/audit/audit.jsonl")
 idempo = IdempotencyStore(ttl_seconds=7 * 24 * 3600)
 correlator = Correlator()
+
+# Risk & Decision entities
+portfolio = PaperPortfolio()
+risk_engine = RiskPolicyEngine(
+    portfolio=portfolio,
+    max_daily_loss=float(os.getenv("ARES_MAX_DAILY_LOSS", "-200")),
+    cooldown_after_loss_seconds=int(os.getenv("ARES_COOLDOWN_SECONDS", "300")),
+    default_qty=float(os.getenv("ARES_PAPER_QTY", "1.0")),
+)
+
 
 # Configurable via env, with safe defaults
 REPLAY_WINDOW_SECONDS = int(os.getenv("ARES_REPLAY_WINDOW_SECONDS", "120"))
@@ -148,7 +161,11 @@ async def tradingview_webhook(request: Request):
         received_time_utc=datetime.now(timezone.utc),
     )
 
-    decision = correlator.evaluate(record)
+    corr_decision = correlator.evaluate(record)
+
+    # Day 4
+    entry_price = payload.get("entry_hint")  # safe: payload already validated; entry_hint may be absent
+    policy_decision = risk_engine.evaluate(record, corr_decision, entry_price=entry_price)
 
     # Audit accept (gateway layer)
     audit.write({
@@ -168,23 +185,41 @@ async def tradingview_webhook(request: Request):
     # Audit decision (correlation layer)
     audit.write({
         "type": "correlation_decision",
-        "event_id": decision.event_id,
-        "strategy_id": decision.strategy_id,
-        "symbol": decision.symbol,
-        "decision": decision.decision,
-        "reasons": decision.reasons,
-        "context": decision.context,
+        "event_id": corr_decision.event_id,
+        "strategy_id": corr_decision.strategy_id,
+        "symbol": corr_decision.symbol,
+        "decision": corr_decision.decision,
+        "reasons": corr_decision.reasons,
+        "context": corr_decision.context,
         "client_ip": client_ip,
         "body_sha256": body_hash,
     })
+
+    # Risk assessment layer
+    audit.write({
+        "type": "policy_decision",
+        "event_id": policy_decision.event_id,
+        "strategy_id": policy_decision.strategy_id,
+        "symbol": policy_decision.symbol,
+        "decision": policy_decision.decision,
+        "reasons": policy_decision.reasons,
+        "context": policy_decision.context,
+    })
+
 
     return JSONResponse({
         "accepted": True,
         "event_id": event.event_id,
         "gateway_reason": "ok",
         "correlation": {
-            "decision": decision.decision,
-            "reasons": decision.reasons,
-            "context": decision.context,
+            "decision": corr_decision.decision,
+            "reasons": corr_decision.reasons,
+            "context": corr_decision.context,
         },
+        "policy": {
+            "decision": policy_decision.decision,
+            "reasons": policy_decision.reasons,
+            "context": policy_decision.context,
+        },
+        "final_decision": policy_decision.decision
     })
