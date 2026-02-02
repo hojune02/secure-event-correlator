@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal
+from typing import Literal, Optional
 
 
 DecisionType = Literal["ALLOW", "THROTTLE", "BLOCK"]
@@ -11,27 +11,34 @@ DecisionType = Literal["ALLOW", "THROTTLE", "BLOCK"]
 @dataclass(frozen=True)
 class EventRecord:
     """
-    Minimal internal representation for correlation.
-    Keep only what's needed for rules and explainability.
+    Minimal internal representation for correlation & policy.
     """
     event_id: str
-    strategy_id: str
-    symbol: str
-    side: Literal["long", "short"]
-    signal_strength: float
-    sent_time_utc: datetime
+    source: str
+    host: str
+    category: str
+    action: str
+    severity: int
+    timestamp_utc: datetime
     received_time_utc: datetime
+
+    user: Optional[str] = None
+    src_ip: Optional[str] = None
 
 
 @dataclass(frozen=True)
 class CorrelationDecision:
-    """
-    Output of the correlator. This is what downstream policy (Day 4)
-    and execution (Day 5) will consume.
-    """
     event_id: str
-    strategy_id: str
-    symbol: str
+    host: str
+    decision: DecisionType
+    reasons: list[str] = field(default_factory=list)
+    context: dict = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class PolicyDecision:
+    event_id: str
+    host: str
     decision: DecisionType
     reasons: list[str] = field(default_factory=list)
     context: dict = field(default_factory=dict)

@@ -1,37 +1,31 @@
-# ARES Event Schema (TradingView -> ARES)
+# Security Event Schema (sec.event.v1)
 
-## Event Type: tv.signal.v1
-TradingView alerts emit events. ARES treats them as untrusted input.
+ARES ingests untrusted security telemetry events and treats them as log data:
+authenticate → validate → correlate → policy → alert/audit.
+
+## Event Type: sec.event.v1
 
 ### Required fields
-- event_type: "tv.signal.v1"
+- event_type: "sec.event.v1"
 - event_id: string (UUID recommended)
-- strategy_id: string (e.g., "nas100_breakout_v1")
-- strategy_version: string (e.g., "1.0.0")
-- symbol: string (e.g., "OANDA:XAUUSD", "NASDAQ:NDX", broker-specific is OK)
-- timeframe: string (e.g., "5", "15", "60")
-- side: "long" | "short"
-- signal_strength: number in [0, 1]
-- bar_time_utc: ISO8601 string (bar close time that generated signal)
-- sent_time_utc: ISO8601 string (alert emission time)
+- source: string (e.g., "auth", "sysmon", "zeek", "wazuh", "custom-agent")
+- host: string (hostname)
+- timestamp_utc: ISO8601 string (timezone-aware)
+
+- category: string (e.g., "auth", "process", "network")
+- action: string (e.g., "login_failed", "proc_start", "dns_query")
+- severity: integer 0..10
 
 ### Optional fields
-- volatility_atr: number
-- entry_hint: number
-- stop_hint: number
-- tp_hint: number
-- tags: string[]
+- user: string
+- src_ip: string
+- dest_ip: string
+- process_name: string
+- attributes: object (free-form key-values)
 
-### Server-added fields (never supplied by TradingView)
-- received_time_utc
-- client_ip
-- verification_status: "pass" | "fail"
-- verification_reason: string
-
-## Gateway validation rules (to implement Day 2)
+### Gateway rules
 Reject if:
-- missing required fields
-- invalid types (strict schema)
-- sent_time_utc outside allowed window (anti-replay)
-- event_id already seen (idempotency)
-- strategy_id over rate limit
+- missing required fields or bad types
+- timestamp outside replay window
+- duplicate event_id
+- rate limit exceeded
