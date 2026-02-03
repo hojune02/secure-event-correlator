@@ -158,6 +158,43 @@ def main():
                 else:
                     print(i + 1, code, body)
 
+        print("\n9) Password spray detection (same src_ip, many users failing)")
+        host = "host-spray"
+        src_ip = "203.0.113.9"
+        users = ["alice", "bob", "charlie", "dana", "eve", "frank", "grace"]
+
+        # Make 12 failures by cycling through users
+        last = None
+        for i in range(12):
+            u = users[i % len(users)]
+            e = make_event(host=host, user=u, src_ip=src_ip, action="login_failed", severity=6)
+            code, body = post_event(client, secret, e)
+            last = (code, body)
+            if isinstance(body, dict):
+                print(
+                    i + 1,
+                    code,
+                    body.get("correlation", {}).get("decision"),
+                    body.get("correlation", {}).get("reasons"),
+                    body.get("correlation", {}).get("context", {}).get("spray_fail_count"),
+                    body.get("correlation", {}).get("context", {}).get("spray_unique_users"),
+                )
+            else:
+                print(i + 1, code, body)
+
+
+        print("\n10) Success after failures (failures then success)")
+        host = "host-success"
+        user = "alice"
+        src_ip = "198.51.100.10"
+        for i in range(6):
+            e = make_event(host=host, user=user, src_ip=src_ip, action="login_failed", severity=6)
+            post_event(client, secret, e)
+
+        # now send login_success
+        e_success = make_event(host=host, user=user, src_ip=src_ip, action="login_success", severity=7)
+        print(post_event(client, secret, e_success))
+
 
 if __name__ == "__main__":
     main()

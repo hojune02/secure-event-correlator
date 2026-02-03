@@ -81,3 +81,16 @@ class HostPolicyEngine:
 
         # Correlation ALLOW → policy ALLOW
         return PolicyDecision(record.event_id, host, "ALLOW", reasons=["ok"], context=context)
+
+    def get_state(self, host: str) -> dict:
+        st = self._state.get(host)
+        if st is None:
+            return {"host": host, "cooldown_until_utc": None, "quarantine": False}
+        return {
+            "host": host,
+            "cooldown_until_utc": None if st.cooldown_until_utc is None else st.cooldown_until_utc.isoformat(),
+            "quarantine": bool(st.quarantine),
+        }
+
+    def list_quarantined(self) -> list[str]:
+        return [h for h, st in self._state.items() if st.quarantine]

@@ -23,6 +23,10 @@ from engine.correlator import Correlator
 from engine.models import EventRecord
 from engine.policy import HostPolicyEngine
 
+from engine.alert import AlertDeduper, AlertSinkJSONL, build_alert
+from pathlib import Path
+
+
 app = FastAPI(title="secure-event-correlator", version="0.3.0")
 
 # ---- singletons (MVP in-memory) ----
@@ -35,6 +39,10 @@ policy_engine = HostPolicyEngine(
     severity_floor=int(os.getenv("SEC_SEVERITY_FLOOR", "0")),
 )
 
+alert_sink = AlertSinkJSONL(out_file="engine/out/alerts.jsonl")
+alert_deduper = AlertDeduper(ttl_seconds=int(os.getenv("SEC_ALERT_DEDUP_SECONDS", "300")))
+
+
 # ---- configurable guards ----
 REPLAY_WINDOW_SECONDS = int(os.getenv("SEC_REPLAY_WINDOW_SECONDS", "120"))
 RATE_LIMIT_PER_MIN = int(os.getenv("SEC_RATE_LIMIT_PER_MIN", "300"))
@@ -44,6 +52,29 @@ rate_limiter = FixedWindowRateLimiter(limit=RATE_LIMIT_PER_MIN, window_seconds=6
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "secure-event-correlator"}
+
+@app.get("/alerts/recent")
+def alerts_recent(limit: int = 50):
+    limit = max(1, min(limit, 200))
+    path = Path("engine/out/alerts.jsonl")
+    if not path.exists():
+        return {"alerts": []}
+
+    # tail last N lines (simple local approach)
+    lines: list[str] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                lines.append(line)
+
+    tail = lines[-limit:]
+    alerts = []
+    for line in tail:
+        try:
+            alerts.append(json.loads(line))
+        except Exception:
+            continue
+    return {"alerts": alerts}
 
 
 @app.post("/ingest")
@@ -179,6 +210,42 @@ async def ingest(request: Request):
     policy = policy_engine.evaluate(record, corr)
     final_decision = policy.decision
 
+    # ---- Alert emission (deduped) ----
+    # Map correlation reasons to alert rules
+    reason_to_rule = {
+        "brute_force_suspected": ("BRUTE_FORCE_V1", 7, 0.75),
+        "password_spray_suspected": ("PASSWORD_SPRAY_V1", 8, 0.80),
+        "success_after_failures": ("SUCCESS_AFTER_FAILURES_V1", 8, 0.70),
+        "ingest_storm": ("INGEST_STORM_V1", 5, 0.60),
+    }
+
+    for r in corr.reasons:
+        if r not in reason_to_rule:
+            continue
+        rule_id, sev, conf = reason_to_rule[r]
+        if alert_deduper.should_emit(rule_id, record.host, record.user, record.src_ip):
+            alert = build_alert(
+                rule_id=rule_id,
+                host=record.host,
+                severity=sev,
+                confidence=conf,
+                user=record.user,
+                src_ip=record.src_ip,
+                reasons=[r],
+                context=corr.context,
+            )
+            alert_sink.emit(alert)
+            audit.write({
+                "type": "alert_emitted",
+                "alert_id": alert.alert_id,
+                "rule_id": alert.rule_id,
+                "host": alert.host,
+                "severity": alert.severity,
+                "confidence": alert.confidence,
+                "reasons": alert.reasons,
+            })
+
+
     # 8) Audit accept + decisions
     audit.write({
         "type": "gateway_accept",
@@ -229,3 +296,8 @@ async def ingest(request: Request):
         },
         "final_decision": final_decision,
     })
+
+@app.get("/hosts/{host}/state")
+def host_state(host: str):
+    return policy_engine.get_state(host)
+
