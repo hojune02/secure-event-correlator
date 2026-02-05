@@ -1,27 +1,36 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import Optional
+
+
+from engine.persistence.sqlite_store import SQLiteStore
+
 
 
 class IdempotencyStore:
-    """
-    MVP in-memory idempotency store.
-    Stores event_id -> expiry UTC time.
-    """
-    def __init__(self, ttl_seconds: int = 7 * 24 * 3600):
+    def __init__(self, ttl_seconds: int, sqlite_store: Optional["SQLiteStore"] = None):
         self.ttl = timedelta(seconds=ttl_seconds)
-        self._store: dict[str, datetime] = {}
+        self._seen: dict[str, datetime] = {}
+        self.sqlite = sqlite_store
 
     def seen(self, event_id: str) -> bool:
-        self._cleanup()
-        return event_id in self._store
+        if self.sqlite is not None:
+            return self.sqlite.idempo_seen(event_id)
+
+        self._gc()
+        return event_id in self._seen
 
     def mark(self, event_id: str) -> None:
-        self._cleanup()
-        self._store[event_id] = datetime.now(timezone.utc) + self.ttl
+        if self.sqlite is not None:
+            self.sqlite.idempo_mark(event_id)
+            return
 
-    def _cleanup(self) -> None:
+        self._seen[event_id] = datetime.now(timezone.utc)
+
+    def _gc(self) -> None:
         now = datetime.now(timezone.utc)
-        expired = [k for k, exp in self._store.items() if exp <= now]
-        for k in expired:
-            self._store.pop(k, None)
+        cutoff = now - self.ttl
+        dead = [k for k, t in self._seen.items() if t < cutoff]
+        for k in dead:
+            self._seen.pop(k, None)

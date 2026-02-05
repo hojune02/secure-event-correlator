@@ -6,6 +6,7 @@ from typing import Optional
 
 from engine.models import CorrelationDecision, EventRecord, PolicyDecision
 
+from engine.persistence.sqlite_store import SQLiteStore
 
 @dataclass
 class HostPolicyState:
@@ -28,11 +29,14 @@ class HostPolicyEngine:
         cooldown_seconds: int = 120,
         quarantine_on: tuple[str, ...] = ("brute_force_suspected",),
         severity_floor: int = 0,
+        sqlite_store: SQLiteStore | None = None
     ):
         self.cooldown = timedelta(seconds=cooldown_seconds)
         self.quarantine_on = set(quarantine_on)
         self.severity_floor = severity_floor
         self._state: dict[str, HostPolicyState] = {}
+        self.sqlite = sqlite_store
+
 
     def evaluate(self, record: EventRecord, corr: CorrelationDecision) -> PolicyDecision:
         host = record.host
@@ -40,6 +44,19 @@ class HostPolicyEngine:
         if st is None:
             st = HostPolicyState()
             self._state[host] = st
+
+        if self.sqlite is not None:
+            persisted = self.sqlite.get_host_state(host)
+            if st is None:
+                st = HostPolicyState()
+            # hydrate in-memory
+            st.quarantine = persisted.quarantine
+            if persisted.cooldown_until_utc:
+                st.cooldown_until_utc = datetime.fromisoformat(persisted.cooldown_until_utc)
+            else:
+                st.cooldown_until_utc = None
+            self._state[host] = st
+
 
         now = datetime.now(timezone.utc)
 
@@ -67,22 +84,51 @@ class HostPolicyEngine:
             # escalate to quarantine if rule matches
             if any(r in self.quarantine_on for r in corr.reasons):
                 st.quarantine = True
+                # Update DB
+                if self.sqlite is not None:
+                    self.sqlite.set_host_state(
+                        host,
+                        None if st.cooldown_until_utc is None else st.cooldown_until_utc.isoformat(),
+                        st.quarantine,
+                    )
                 return PolicyDecision(record.event_id, host, "BLOCK", reasons=["quarantine_activated"], context=context)
             # otherwise just block with cooldown
             st.cooldown_until_utc = now + self.cooldown
             context["cooldown_set_until_utc"] = st.cooldown_until_utc.isoformat()
+            # Update DB
+            if self.sqlite is not None:
+                self.sqlite.set_host_state(
+                    host,
+                    None if st.cooldown_until_utc is None else st.cooldown_until_utc.isoformat(),
+                    st.quarantine,
+                )
+
             return PolicyDecision(record.event_id, host, "BLOCK", reasons=["correlation_block"], context=context)
 
         # If correlator THROTTLE, set cooldown but allow monitoring
         if corr.decision == "THROTTLE":
             st.cooldown_until_utc = now + self.cooldown
             context["cooldown_set_until_utc"] = st.cooldown_until_utc.isoformat()
+            # Update DB
+            if self.sqlite is not None:
+                self.sqlite.set_host_state(
+                    host,
+                    None if st.cooldown_until_utc is None else st.cooldown_until_utc.isoformat(),
+                    st.quarantine,
+                )
             return PolicyDecision(record.event_id, host, "THROTTLE", reasons=["suspicious_cooldown_set"], context=context)
 
         # Correlation ALLOW → policy ALLOW
         return PolicyDecision(record.event_id, host, "ALLOW", reasons=["ok"], context=context)
 
     def get_state(self, host: str) -> dict:
+        if self.sqlite is not None:
+            st = self.sqlite.get_host_state(host)
+            return {
+                "host": host,
+                "cooldown_until_utc": st.cooldown_until_utc,
+                "quarantine": bool(st.quarantine),
+            }
         st = self._state.get(host)
         if st is None:
             return {"host": host, "cooldown_until_utc": None, "quarantine": False}

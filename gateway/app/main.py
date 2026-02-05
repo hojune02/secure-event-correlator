@@ -26,17 +26,25 @@ from engine.policy import HostPolicyEngine
 from engine.alert import AlertDeduper, AlertSinkJSONL, build_alert
 from pathlib import Path
 
+from engine.persistence.sqlite_store import SQLiteStore
 
 app = FastAPI(title="secure-event-correlator", version="0.3.0")
 
+# Last day - persistence using sqlite
+sqlite = None
+if os.getenv("SEC_USE_SQLITE", "1") == "1":
+    sqlite = SQLiteStore(db_path=os.getenv("SEC_SQLITE_PATH", "engine/out/state.db"))
+
+
 # ---- singletons (MVP in-memory) ----
 audit = AuditLogger(file_path="gateway/audit/audit.jsonl")
-idempo = IdempotencyStore(ttl_seconds=7 * 24 * 3600)
+idempo = IdempotencyStore(ttl_seconds=7 * 24 * 3600, sqlite_store=sqlite)
 
 correlator = Correlator()
 policy_engine = HostPolicyEngine(
     cooldown_seconds=int(os.getenv("SEC_COOLDOWN_SECONDS", "120")),
     severity_floor=int(os.getenv("SEC_SEVERITY_FLOOR", "0")),
+    sqlite_store=sqlite,
 )
 
 alert_sink = AlertSinkJSONL(out_file="engine/out/alerts.jsonl")
@@ -190,6 +198,11 @@ async def ingest(request: Request):
 
     # Mark idempotency AFTER checks pass
     idempo.mark(event.event_id)
+
+    # optional: opportunistic GC
+    if sqlite is not None:
+        sqlite.idempo_gc(ttl_seconds=7 * 24 * 3600)
+
 
     # 6) Normalize into internal record
     record = EventRecord(
